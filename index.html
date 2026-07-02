@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>象棋：从零开始的深度学习</title>
+  <title>象棋：从零开始的渐进练习</title>
   <style>
     * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
     body {
@@ -81,11 +81,18 @@
       display: flex; justify-content: center; align-items: center;
       font-size: 1.1rem; font-weight: bold; cursor: pointer;
       box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-      transition: transform 0.1s;
+      transition: transform 0.3s ease;
     }
     .piece.red { color: #cc0000; border-color: #cc0000; }
     .piece.black { color: #000000; border-color: #000000; }
     .piece:active { transform: scale(0.92); }
+    
+    .piece.rotate180 {
+      transform: rotate(180deg);
+    }
+    .piece.rotate180:active {
+      transform: rotate(180deg) scale(0.92);
+    }
     
     .click-trigger.selected .piece { outline: 3px solid #ffaa00; box-shadow: 0 0 12px #ffaa00; }
     .click-trigger.hint::before {
@@ -128,11 +135,11 @@
   
   <div class="top-bar">
     <select id="difficultySelect">
-      <option value="easy">🟢 初识：移动棋子</option>
-      <option value="medium" selected>🟡 进攻：尝试吃子</option>
-      <option value="hard">🔴 谨慎：莫入虎穴</option>
-      <option value="expert">🔥 入流：评估敌人的行动</option>
-      <option value="defense">🛡️ 棋子间的配合：防御</option>
+      <option value="easy"selected>💚一级:AI啥也不懂</option>
+      <option value="medium">💛二级:AI学会吃子</option>
+      <option value="hard"> 🧡三级:AI谨慎落子</option>
+      <option value="expert">❤️四级AI学会躲避</option>
+      <option value="defense">🛡️五级:AI学会配合</option>
     </select>
     <button id="restartBtn">🔄 重开</button>
     <button id="undoBtn" disabled>↩️ 悔棋 (<span id="undoCount">3</span>)</button>
@@ -145,8 +152,9 @@
 
   <div id="game-over-msg"></div>
   <div class="footer-hint">
-    💡 点击红方棋子选中，再点击绿色圆点走棋。<br>
-    请放下负担，在试错中深度学习吧！
+    💡 点击我方棋子选中，再点击绿色圆点走棋。<br>
+    🔁 手机倒转180°，可更换执方。<br>
+    💥 大力快速摇晃手机，即可物理掀桌重开！
   </div>
 
 <script>
@@ -159,10 +167,14 @@ let board = Array(10).fill(null).map(() => Array(9).fill(null));
 let selectedSquare = null;
 let legalMovesForSelected = [];
 let isPlayerTurn = true;
+let playerSide = RED; 
 let gameOver = false;
-let lastMove = null; // { fromR, fromC, toR, toC }
-let history = []; // 存储每一步 { fromR, fromC, toR, toC, captured }
+let lastMove = null; 
+let history = []; 
 let undoRemain = 3;
+let aiTimeoutId = null; 
+
+let isExploding = false;       
 
 // DOM 引用
 const statusEl = document.getElementById('status');
@@ -175,11 +187,13 @@ const undoCountSpan = document.getElementById('undoCount');
 
 // ==================== 初始化 ====================
 function initGame() {
-// 【新添加：读取保存的难度】
+  if (aiTimeoutId) clearTimeout(aiTimeoutId); 
+
   const savedDifficulty = localStorage.getItem('chess_difficulty');
   if (savedDifficulty) {
     difficultySelect.value = savedDifficulty;
   }
+
   board = Array(10).fill(null).map(() => Array(9).fill(null));
   // 黑方 (顶端)
   board[0][0] = { type: TYPE.JU, side: BLACK }; board[0][8] = { type: TYPE.JU, side: BLACK };
@@ -200,22 +214,41 @@ function initGame() {
 
   selectedSquare = null;
   legalMovesForSelected = [];
-  isPlayerTurn = true;
+  
+  const currentTurnSide = (history.length % 2 === 0) ? RED : BLACK;
+  isPlayerTurn = (playerSide === currentTurnSide);
+
   gameOver = false;
   lastMove = null;
   history = [];
   undoRemain = 3;
+  isExploding = false;       
   gameOverMsgEl.innerText = '';
-  statusEl.innerText = '♟ 轮到你了（红方）';
-
+  
+  updateStatusText();
   updateUndoButton();
   renderBoard();
+
+  checkAndTriggerAi(400);
+}
+
+function updateStatusText() {
+  if (gameOver) return;
+  const sideName = playerSide === RED ? '红方' : '黑方';
+  const currentTurnSide = (history.length % 2 === 0) ? RED : BLACK;
+  
+  if (playerSide === currentTurnSide) {
+    statusEl.innerText = `♟ 轮到你了（${sideName}）`;
+  } else {
+    statusEl.innerText = '🤖 AI 思考中 ...';
+  }
 }
 
 // ==================== 渲染 ====================
 function renderBoard() {
+  if (isExploding) return; 
+
   boardEl.innerHTML = '';
-  // 网格线
   for (let r = 0; r < 9; r++) {
     for (let c = 0; c < 8; c++) {
       const cell = document.createElement('div');
@@ -225,7 +258,6 @@ function renderBoard() {
       boardEl.appendChild(cell);
     }
   }
-  // 棋子 & 交互点
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
       const trigger = document.createElement('div');
@@ -248,6 +280,11 @@ function renderBoard() {
       if (piece) {
         const pieceEl = document.createElement('div');
         pieceEl.className = `piece ${piece.side}`;
+        
+        if (playerSide === BLACK) {
+          pieceEl.classList.add('rotate180');
+        }
+
         let name = piece.type;
         if (piece.side === BLACK) {
           if (name === TYPE.JIANG) name = '将';
@@ -271,12 +308,12 @@ function renderBoard() {
 
 // ==================== 交互逻辑 ====================
 function handleCellClick(r, c) {
-  if (!isPlayerTurn || gameOver) return;
+  if (!isPlayerTurn || gameOver || isExploding) return;
 
   const clicked = board[r][c];
-  if (clicked && clicked.side === RED) {
+  if (clicked && clicked.side === playerSide) {
     selectedSquare = { r, c };
-    legalMovesForSelected = getLegalMoves(r, c, RED);
+    legalMovesForSelected = getLegalMoves(r, c, playerSide);
     renderBoard();
     return;
   }
@@ -284,13 +321,11 @@ function handleCellClick(r, c) {
   const move = legalMovesForSelected.find(m => m.toR === r && m.toC === c);
   if (move) {
     const isGameOver = executeMove(move);
-    if (isGameOver) {
-      return;
-    }
+    if (isGameOver) return;
     isPlayerTurn = false;
-    statusEl.innerText = '🤖 AI 思考中 ...';
+    updateStatusText();
     updateUndoButton();
-    setTimeout(() => aiTurn(), 400);
+    checkAndTriggerAi(400); 
   } else {
     selectedSquare = null;
     legalMovesForSelected = [];
@@ -317,9 +352,9 @@ function executeMove(move) {
   if (target && target.type === TYPE.JIANG) {
     gameOver = true;
     isPlayerTurn = false;
-    if (target.side === RED) {
+    if (target.side === playerSide) {
       statusEl.innerText = '😢 你输了 ... 继续加油！';
-      gameOverMsgEl.innerText = '💔 老帅被吃';
+      gameOverMsgEl.innerText = target.side === RED ? '💔 老帅被吃' : '💔 大将被吃';
     } else {
       statusEl.innerText = '🎉 恭喜你赢了！太棒了！';
       gameOverMsgEl.innerText = '🏆 你战胜了 AI！';
@@ -329,16 +364,36 @@ function executeMove(move) {
   return false;
 }
 
+// ==================== AI触发器 ====================
+function checkAndTriggerAi(delayMs) {
+  if (gameOver || isExploding) return;
+  if (aiTimeoutId) clearTimeout(aiTimeoutId);
+
+  const currentTurnSide = (history.length % 2 === 0) ? RED : BLACK;
+  
+  if (playerSide !== currentTurnSide) {
+    isPlayerTurn = false;
+    aiTimeoutId = setTimeout(() => {
+      if (!gameOver && !isExploding && playerSide !== ((history.length % 2 === 0) ? RED : BLACK)) {
+        updateStatusText();
+        aiTurn();
+      }
+    }, delayMs);
+  } else {
+    isPlayerTurn = true;
+    updateStatusText();
+  }
+}
+
 // ==================== 悔棋功能 ====================
 function undo() {
-  if (undoRemain <= 0) {
-    statusEl.innerText = '⚠️ 悔棋次数已用完！';
-    return;
-  }
+  if (undoRemain <= 0 || isExploding) return;
   if (history.length < 2) {
     statusEl.innerText = '⚠️ 没有足够的步数可以悔棋';
     return;
   }
+  if (aiTimeoutId) clearTimeout(aiTimeoutId); 
+
   const aiStep = history.pop();
   const playerStep = history.pop();
 
@@ -356,7 +411,7 @@ function undo() {
   selectedSquare = null;
   legalMovesForSelected = [];
   gameOverMsgEl.innerText = '';
-  statusEl.innerText = '♟ 悔棋成功，轮到你了（红方）';
+  updateStatusText();
   undoRemain--;
   updateUndoButton();
   renderBoard();
@@ -364,18 +419,21 @@ function undo() {
 
 function updateUndoButton() {
   undoCountSpan.innerText = undoRemain;
-  undoBtn.disabled = (undoRemain <= 0 || history.length < 2);
+  undoBtn.disabled = (undoRemain <= 0 || history.length < 2 || isExploding);
 }
 
-// ==================== AI 核心 ====================
+// ==================== AI 核心计算 ====================
 function aiTurn() {
-  if (gameOver) return;
+  if (gameOver || isExploding) return;
+
+  const aiSide = (playerSide === RED) ? BLACK : RED;
+  const humanSide = playerSide;
 
   let allMoves = [];
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
-      if (board[r][c] && board[r][c].side === BLACK) {
-        allMoves.push(...getLegalMoves(r, c, BLACK));
+      if (board[r][c] && board[r][c].side === aiSide) {
+        allMoves.push(...getLegalMoves(r, c, aiSide));
       }
     }
   }
@@ -421,9 +479,7 @@ function aiTurn() {
       let score = 0;
       const target = board[move.toR][move.toC];
       if (target) score += getPieceValue(target) * 1.5;
-      const fromPiece = board[move.fromR][move.fromC];
-      const fromVal = getPieceValue(fromPiece);
-      const attackers = getAttackers(move.toR, move.toC, RED);
+      const attackers = getAttackers(move.toR, move.toC, humanSide);
       if (attackers.length > 0) {
         const attackerVals = attackers.map(a => getPieceValue(a));
         const maxAttackerVal = Math.max(...attackerVals);
@@ -445,14 +501,13 @@ function aiTurn() {
     for (const move of allMoves) {
       let score = 0;
       const target = board[move.toR][move.toC];
-      
       if (target) score += getPieceValue(target) * 1.5;
 
       const movingPiece = board[move.fromR][move.fromC];
       board[move.toR][move.toC] = movingPiece;
       board[move.fromR][move.fromC] = null;
 
-      const postAttackers = getAttackers(move.toR, move.toC, RED);
+      const postAttackers = getAttackers(move.toR, move.toC, humanSide);
       if (postAttackers.length > 0) {
         const maxAttackerVal = Math.max(...postAttackers.map(a => getPieceValue(a)));
         score -= maxAttackerVal * 0.8;
@@ -461,7 +516,7 @@ function aiTurn() {
       let jiangR = -1, jiangC = -1;
       for (let r = 0; r < 10; r++) {
         for (let c = 0; c < 9; c++) {
-          if (board[r][c] && board[r][c].type === TYPE.JIANG && board[r][c].side === BLACK) {
+          if (board[r][c] && board[r][c].type === TYPE.JIANG && board[r][c].side === aiSide) {
             jiangR = r; jiangC = c;
             break;
           }
@@ -470,10 +525,8 @@ function aiTurn() {
       }
       
       if (jiangR !== -1) {
-        const jiangAttackers = getAttackers(jiangR, jiangC, RED);
-        if (jiangAttackers.length > 0) {
-          score -= 500; 
-        }
+        const jiangAttackers = getAttackers(jiangR, jiangC, humanSide);
+        if (jiangAttackers.length > 0) score -= 500; 
       }
 
       board[move.fromR][move.fromC] = movingPiece;
@@ -496,14 +549,13 @@ function aiTurn() {
     for (const move of allMoves) {
       let score = 0;
       const target = board[move.toR][move.toC];
-      
       if (target) score += getPieceValue(target) * 1.5;
 
       const movingPiece = board[move.fromR][move.fromC];
       board[move.toR][move.toC] = movingPiece;
       board[move.fromR][move.fromC] = null;
 
-      const postAttackers = getAttackers(move.toR, move.toC, RED);
+      const postAttackers = getAttackers(move.toR, move.toC, humanSide);
       if (postAttackers.length > 0) {
         const maxAttackerVal = Math.max(...postAttackers.map(a => getPieceValue(a)));
         score -= maxAttackerVal * 0.8;
@@ -512,27 +564,9 @@ function aiTurn() {
       let jiangR = -1, jiangC = -1;
       for (let r = 0; r < 10; r++) {
         for (let c = 0; c < 9; c++) {
-          if (board[r][c] && board[r][c].type === TYPE.JIANG && board[r][c].side === BLACK) {
-            jiangR = r; jiangC = c;
-            break;
-          }
-        }
-        if (jiangR !== -1) break;
-      }
-      
-      if (jiangR !== -1) {
-        const jiangAttackers = getAttackers(jiangR, jiangC, RED);
-        if (jiangAttackers.length > 0) {
-          score -= 500; 
-        }
-      }
-
-      // 【微小的防御配合逻辑】如果这步棋没有送子或避开了老帅危机，顺便给一个原本处于危险且“无根”的队友加上了根，提供 0.1 分微小奖励
-      for (let r = 0; r < 10; r++) {
-        for (let c = 0; c < 9; col++) {
-          let col = c; // 防止重名
-          if (board[r][col] && board[r][col].side === BLACK && (r !== move.toR || col !== move.toC)) {
-            if (getAttackers(r, col, RED).length > 0 && getAttackers(r, col, BLACK).length > 0) {
+          let col = c;
+          if (board[r][col] && board[r][col].side === aiSide && (r !== move.toR || col !== move.toC)) {
+            if (getAttackers(r, col, humanSide).length > 0 && getAttackers(r, col, aiSide).length > 0) {
               score += 0.1;
             }
           }
@@ -558,13 +592,14 @@ function aiTurn() {
 
   const gameEnded = executeMove(chosenMove);
   if (!gameEnded) {
-    isPlayerTurn = true;
-    statusEl.innerText = '♟ 轮到你了（红方）';
+    const currentTurnSide = (history.length % 2 === 0) ? RED : BLACK;
+    isPlayerTurn = (playerSide === currentTurnSide);
+    updateStatusText();
   }
   updateUndoButton();
 }
 
-// ==================== 辅助函数 ====================
+// ==================== 辅助与扫描函数 ====================
 function getAttackers(r, c, attackerSide) {
   const attackers = [];
   for (let row = 0; row < 10; row++) {
@@ -572,20 +607,16 @@ function getAttackers(r, c, attackerSide) {
       const p = board[row][col];
       if (p && p.side === attackerSide) {
         const moves = getLegalMoves(row, col, attackerSide);
-        if (moves.some(m => m.toR === r && m.toC === c)) {
-          attackers.push(p);
-        }
+        if (moves.some(m => m.toR === r && m.toC === c)) attackers.push(p);
       }
     }
   }
   return attackers;
 }
 
+// 修改自原生获取分值方法，使其不阻断任何动作
 function getPieceValue(piece) {
-  const nameMap = {
-    '车': 9, '马': 4, '炮': 4, '象': 2, '士': 2, '将': 100,
-    '帅': 100, '相': 2, '仕': 2, '兵': 1, '卒': 1
-  };
+  const nameMap = { '车': 9, '马': 4, '炮': 4, '象': 2, '士': 2, '将': 100, '帅': 100, '相': 2, '仕': 2, '兵': 1, '卒': 1 };
   let key = piece.type;
   if (piece.type === TYPE.JIANG) key = (piece.side === RED) ? '帅' : '将';
   else if (piece.type === TYPE.BING) key = (piece.side === RED) ? '兵' : '卒';
@@ -594,7 +625,6 @@ function getPieceValue(piece) {
   return nameMap[key] || 1;
 }
 
-// ==================== 走法生成器 ====================
 function getLegalMoves(r, c, side) {
   const piece = board[r][c];
   if (!piece) return [];
@@ -692,14 +722,210 @@ function getLegalMoves(r, c, side) {
   return moves;
 }
 
+// ==================== 💥 核心：物理掀桌冲撞动力学 💥 ====================
+function triggerBoardExplosion() {
+  if (isExploding) return;
+  isExploding = true;
+  gameOver = true; 
+
+  if (aiTimeoutId) clearTimeout(aiTimeoutId);
+
+  statusEl.innerText = '💥';
+  gameOverMsgEl.innerText = '💥';
+
+  const rect = boardEl.getBoundingClientRect();
+  const boardW = rect.width;
+  const boardH = rect.height;
+
+  // 1. 提取所有存活棋子转化为自由粒子
+  const particles = [];
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      if (board[r][c]) {
+        const posX = (boardW / 9) * (c + 0.5);
+        const posY = (boardH / 10) * (r + 0.5);
+        
+        // 初始爆发速度
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 12 + Math.random() * 10; 
+
+        particles.push({
+          info: board[r][c],
+          x: posX,
+          y: posY,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          radius: 18, 
+          dom: null
+        });
+      }
+    }
+  }
+
+  // 2. 清除原本挂载在棋盘上的旧点击触发层(棋子)，但保留原先画好的格子
+  const clickTriggers = boardEl.querySelectorAll('.click-trigger');
+  clickTriggers.forEach(el => el.remove());
+
+  // 挂载粒子 DOM
+  particles.forEach(p => {
+    const el = document.createElement('div');
+    el.className = `piece ${p.info.side}`;
+    if (playerSide === BLACK) el.classList.add('rotate180');
+    
+    let name = p.info.type;
+    if (p.info.side === BLACK) {
+      if (name === TYPE.JIANG) name = '将';
+      else if (name === TYPE.BING) name = '卒';
+      else if (name === TYPE.XIANG) name = '象';
+      else if (name === TYPE.SHI) name = '士';
+    } else {
+      if (name === TYPE.JIANG) name = '帅';
+      else if (name === TYPE.XIANG) name = '相';
+      else if (name === TYPE.SHI) name = '仕';
+    }
+    el.innerText = name;
+
+    el.style.position = 'absolute';
+    el.style.width = '36px';
+    el.style.height = '36px';
+    el.style.zIndex = '10';
+    el.style.transition = 'none'; 
+    
+    boardEl.appendChild(el);
+    p.dom = el;
+  });
+
+  // 3. 纯粹的地表摩擦力自然滑行减速主循环
+  function updatePhysicsFrame() {
+    let anyMoving = false;
+    const friction = 0.96;      
+    const stopThreshold = 0.15;  
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      const currentSpeed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+
+      if (currentSpeed < stopThreshold) {
+        p.vx = 0;
+        p.vy = 0;
+        continue;
+      }
+
+      anyMoving = true;
+
+      p.vx *= friction;
+      p.vy *= friction;
+
+      p.x += p.vx;
+      p.y += p.vy;
+
+      if (p.x - p.radius < 0) { p.x = p.radius; p.vx *= -1; }
+      if (p.x + p.radius > boardW) { p.x = boardW - p.radius; p.vx *= -1; }
+      if (p.y - p.radius < 0) { p.y = p.radius; p.vy *= -1; }
+      if (p.y + p.radius > boardH) { p.y = boardH - p.radius; p.vy *= -1; }
+
+      if (p.dom) {
+        p.dom.style.left = `${p.x - 18}px`;
+        p.dom.style.top = `${p.y - 18}px`;
+      }
+    }
+
+    if (anyMoving) {
+      requestAnimationFrame(updatePhysicsFrame);
+    } else {
+      setTimeout(() => {
+        initGame();
+      }, 1200);
+    }
+  }
+
+  requestAnimationFrame(updatePhysicsFrame);
+}
+
+// ==================== 摇晃加速度计监听 ====================
+let lastX = null, lastY = null, lastZ = null;
+let shakeCount = 0;
+let lastShakeTime = 0;
+
+window.addEventListener('devicemotion', (event) => {
+  // 移除了 original 的 gameOver 条件阻断，让游戏结束后乃至任何时刻都可以触发物理掀桌
+  if (isExploding) return;
+
+  const acc = event.accelerationIncludingGravity;
+  if (!acc) return;
+
+  const currentX = acc.x;
+  const currentY = acc.y;
+  const currentZ = acc.z;
+
+  if (lastX !== null) {
+    const deltaX = Math.abs(currentX - lastX);
+    const deltaY = Math.abs(currentY - lastY);
+    const deltaZ = Math.abs(currentZ - lastZ);
+
+    if (deltaX > 14 || deltaY > 14 || deltaZ > 14) {
+      const now = Date.now();
+      if (now - lastShakeTime < 400) {
+        shakeCount++;
+      } else {
+        shakeCount = 1; 
+      }
+      lastShakeTime = now;
+
+      if (shakeCount >= 4) {
+        triggerBoardExplosion();
+      }
+    }
+  }
+
+  lastX = currentX;
+  lastY = currentY;
+  lastZ = currentZ;
+});
+
 // ==================== 事件绑定 ====================
 restartBtn.addEventListener('click', initGame);
-// 【修改：切换难度时保存到本地存储】
+undoBtn.addEventListener('click', undo);
+
 difficultySelect.addEventListener('change', () => {
   localStorage.setItem('chess_difficulty', difficultySelect.value);
   initGame();
 });
-undoBtn.addEventListener('click', undo);
+
+window.addEventListener('deviceorientation', (event) => {
+  if (gameOver || isExploding) return;
+  const beta = event.beta;
+  if (beta !== null) {
+    let changed = false;
+    
+    if (beta < -30 && playerSide === RED) {
+      playerSide = BLACK;
+      changed = true;
+    } else if (beta > 30 && playerSide === BLACK) {
+      playerSide = RED;
+      changed = true;
+    }
+
+    if (changed) {
+      selectedSquare = null;
+      legalMovesForSelected = [];
+      renderBoard(); 
+      
+      const currentTurnSide = (history.length % 2 === 0) ? RED : BLACK;
+      
+      if (playerSide !== currentTurnSide) {
+        isPlayerTurn = false;
+        statusEl.innerText = '🔄 视角切换中，请适应新阵营...';
+        checkAndTriggerAi(1300);
+      } else {
+        isPlayerTurn = true;
+        updateStatusText();
+        if (aiTimeoutId) clearTimeout(aiTimeoutId); 
+      }
+    }
+  }
+});
 
 // ==================== 启动 ====================
 initGame();
